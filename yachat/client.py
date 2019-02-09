@@ -1,11 +1,28 @@
+#!/usr/bin/env python3
+
+import argparse     # Parsing command-line arguments
+import logging      # Logging
+#from sys import exit
+
 import socket
 
 # from _thread import *
 import threading
 
-# import sys
+
+##
+# Globals
+##########
+default_log_file = None         # Log messages will be printed to stdin
+default_log_level = 'INFO'
+
+err_ok = 0
+err_arg = 1
 
 
+##
+# Classes
+##########
 class Chatter:
     """ Chat client main class.
     """
@@ -26,6 +43,14 @@ class Chatter:
         #
         # The first entry is this instance of the client.
         self.clients = [{'screen_name': screen_name, 'ip': None, 'udp_port': None}]
+
+        logging.debug('Initial Chatter configuration:\n\tchat_server = {0}\n\tclients = {1}'
+                      .format(self.chat_server, self.clients))
+
+    def run(self):
+        """ Run Chatter client.
+        """
+        logging.debug('Starting Chatter...')
 
 
 class Listener (threading.Thread):
@@ -90,3 +115,41 @@ class Sender (threading.Thread):
         msg_from_server = str(s.recv(2048))
 
         print("FROM SERVER: " + msg_from_server)
+
+
+##
+# Entry point
+##############
+if __name__ == '__main__':
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='YaChat Chatter client.')
+
+    parser.add_argument('screen_name', help='Screen name of chat user.')
+    parser.add_argument('server_hostname', help='Hostname of chat server.')
+    parser.add_argument('server_port', type=int, help='Port of chat server.')
+    parser.add_argument('-f', '--log-file', help='Log file path.')
+    parser.add_argument('-l', '--log-level', help='Verbosity level of the logger.')
+
+    args = parser.parse_args()
+
+    # Set up logger
+    if not args.log_file:
+        args.log_file = default_log_file
+    if not args.log_level:
+        args.log_level = default_log_level
+
+    log_level = getattr(logging, args.log_level.upper(), args.log_level.upper())
+    if not isinstance(log_level, int):
+        logging.critical('Wrong log level provided: {0}'.format(args.log_level))
+        exit(err_arg)
+
+    logging.basicConfig(format="%(asctime)s %(levelname)s:%(module)s:%(funcName)s: %(message)s",
+                        filename=args.log_file, level=log_level)
+
+    logging.debug('Arguments: {0}'.format(args))
+
+    # Create and run Chatter object
+    chatter = Chatter(args.screen_name, args.server_hostname, args.server_port)
+    chatter.run()
+
+    exit(err_ok)
