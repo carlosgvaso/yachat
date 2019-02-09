@@ -14,10 +14,19 @@ import threading
 # Globals
 ##########
 default_log_file = None         # Log messages will be printed to stdin
-default_log_level = 'INFO'
+default_log_level = 'WARN'
 
 err_ok = 0
 err_arg = 1
+
+# Protocol
+proto_tcp_helo = 'HELO {0} {1} {2}\n'   # HELO <screen_name> <IP> <Port>\n
+proto_tcp_acpt = 'ACPT {0}\n'           # ACPT <SN1> <IP1> <PORT1>:<SN2> <IP2> <PORT2>:...:<SNn> <IPn> <PORTn>\n
+proto_tcp_rjct = 'RJCT {0}\n'           # RJCT <screen_name>\n
+proto_tcp_exit = 'EXIT\n'               # EXIT\n
+proto_udp_join = 'JOIN {0} {1} {2}\n'   # JOIN <screen_name> <IP> <Port>\n
+proto_udp_mesg = 'MESG {0}: {1}\n'      # MESG <screen_name>: <message>\n
+proto_udp_exit = 'EXIT {0}\n'           # EXIT <screen_name>\n
 
 
 ##
@@ -44,13 +53,63 @@ class Chatter:
         # The first entry is this instance of the client.
         self.clients = [{'screen_name': screen_name, 'ip': None, 'udp_port': None}]
 
+        # Sockets
+        self.s_server_tcp = None
+        self.s_server_udp = None
+
         logging.debug('Initial Chatter configuration:\n\tchat_server = {0}\n\tclients = {1}'
                       .format(self.chat_server, self.clients))
+
+    def create_udp_port(self):
+        """ Create UDP port to talk to other clients.
+
+            TODO: implement method.
+        """
+        self.clients[0]['ip'] = 'localhost'
+        self.clients[0]['udp_port'] = 88000
+
+    def exit_server(self):
+        """ Exit chat server.
+
+            Must be run after Chatter.join_server().
+
+            TODO:
+                - Confirm exit using server's UDP exit confirmation.
+                - Check the socket exists and it is connected.
+        """
+        msg = bytes(proto_tcp_exit.encode(encoding='utf-8'))
+        logging.debug('msg = {0}'.format(msg))
+        self.s_server_tcp.send(msg)
+        #self.s_server_tcp.shutdown()
+        self.s_server_tcp.close()
+
+    def join_server(self):
+        """ Join chat server.
+
+            Must be run after Chatter.create_udp_port().
+        """
+        logging.info('Joining the chat membership server...')
+        # create an INET, STREAMing socket, and connect to the chat server
+        self.s_server_tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.s_server_tcp.connect((self.chat_server['hostname'], self.chat_server['welcome_port']))
+
+        msg = bytes(proto_tcp_helo
+                    .format(self.clients[0]['screen_name'], self.clients[0]['ip'], self.clients[0]['udp_port'])
+                    .encode(encoding='utf-8'))
+        logging.debug('msg = {0}'.format(msg))
+        self.s_server_tcp.send(msg)
+
+        msg_server = self.s_server_tcp.recv(2048)
+        logging.debug('msg_server: {0}'.format(msg_server))
 
     def run(self):
         """ Run Chatter client.
         """
-        logging.debug('Starting Chatter...')
+        logging.info('Starting Chatter...')
+
+        self.create_udp_port()
+        self.join_server()
+        self.exit_server()
 
 
 class Listener (threading.Thread):
