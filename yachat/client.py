@@ -57,6 +57,8 @@ class Chatter:
         self.s_server_tcp = None
         self.s_server_udp = None
 
+        self.msg_leftovers_tcp = bytes()    # If we receive the beginning of the next msg, save it here
+
         logging.debug('Initial Chatter configuration:\n\tchat_server = {0}\n\tclients = {1}'
                       .format(self.chat_server, self.clients))
 
@@ -66,7 +68,7 @@ class Chatter:
             TODO: implement method.
         """
         self.clients[0]['ip'] = 'localhost'
-        self.clients[0]['udp_port'] = 88000
+        self.clients[0]['udp_port'] = 8800
 
     def exit_server(self):
         """ Exit chat server.
@@ -79,7 +81,9 @@ class Chatter:
         """
         msg = bytes(proto_tcp_exit.encode(encoding='utf-8'))
         logging.debug('msg = {0}'.format(msg))
-        self.s_server_tcp.send(msg)
+
+        self.send_tcp_msg(self.s_server_tcp, msg)
+
         #self.s_server_tcp.shutdown()
         self.s_server_tcp.close()
 
@@ -97,10 +101,54 @@ class Chatter:
                     .format(self.clients[0]['screen_name'], self.clients[0]['ip'], self.clients[0]['udp_port'])
                     .encode(encoding='utf-8'))
         logging.debug('msg = {0}'.format(msg))
-        self.s_server_tcp.send(msg)
+        self.send_tcp_msg(self.s_server_tcp, msg)
 
-        msg_server = self.s_server_tcp.recv(2048)
+        msg_server = self.receive_tcp_msg(self.s_server_tcp)
         logging.debug('msg_server: {0}'.format(msg_server))
+
+    def receive_tcp_msg(self, conn):
+        """ Receive message over TCP socket.
+
+            :param  conn    Socket connection.
+            :return Message received as a bytes object.
+
+            TODO: Make safe for faulty socket connection.
+        """
+        receiving = True
+
+        # Check if last time we received data, we got the beginning of the next msg
+        if self.msg_leftovers_tcp != b'':
+            msg = bytes(self.msg_leftovers_tcp)
+            self.msg_leftovers_tcp = None       # Clear the buffer for the next time
+
+            # Check if we already got a whole second message last time
+            if b'\n' in msg:
+                receiving = False
+
+                b_tmp = msg.split(b'\n')
+                msg = b_tmp[0] + b'\n'
+                self.msg_leftovers_tcp = b'\n'.join(b_tmp[1:])
+        else:
+            msg = bytes()
+
+        while receiving:
+            chunk = conn.recv(2048)
+
+            if b'\n' in chunk:
+                receiving = False
+
+                b_tmp = chunk.split(b'\n')
+                chunk = b_tmp[0] + b'\n'
+                self.msg_leftovers_tcp = b'\n'.join(b_tmp[1:])
+            elif chunk == b'':
+                raise RuntimeError("Socket connection broken")
+
+            msg += chunk
+            logging.debug('chunk: {0}'.format(chunk))
+
+        logging.debug('msg: {0}'.format(msg))
+        logging.debug('msg_leftovers_tcp: {0}'.format(self.msg_leftovers_tcp))
+        return msg
 
     def run(self):
         """ Run Chatter client.
@@ -110,6 +158,30 @@ class Chatter:
         self.create_udp_port()
         self.join_server()
         self.exit_server()
+
+    def send_tcp_msg(self, conn, msg):
+        """ Send message over TCP socket.
+
+            :param  conn    Socket connection.
+            :param  msg     Bytes object to send.
+            :return Length in bytes of the message sent.
+
+            TODO: Make safe for faulty socket connection.
+        """
+        logging.debug('msg: {0}'.format(msg))
+        msg_len = len(msg)
+        logging.debug('msg_len: {0}'.format(msg_len))
+        msg_sent = 0
+
+        while msg_sent < msg_len:
+            sent = conn.send(msg[msg_sent:])
+            if sent == 0:
+                raise RuntimeError("Socket connection broken")
+            msg_sent += sent
+
+            logging.debug('msg_sent: {0}'.format(msg_sent))
+
+        return msg_sent
 
 
 class Listener (threading.Thread):
