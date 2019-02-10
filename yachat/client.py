@@ -19,6 +19,7 @@ default_log_level = 'WARN'
 # Exit codes
 err_ok = 0
 err_arg = 1
+err_join = 2
 
 # Protocol
 proto_tcp_helo = 'HELO {0} {1} {2}\n'   # HELO <screen_name> <IP> <Port>\n
@@ -80,6 +81,8 @@ class Chatter:
                 - Confirm exit using server's UDP exit confirmation.
                 - Check the socket exists and it is connected.
         """
+        logging.info('Exiting server...')
+
         msg = bytes(proto_tcp_exit.encode(encoding='utf-8'))
         logging.debug('msg = {0}'.format(msg))
 
@@ -92,8 +95,11 @@ class Chatter:
         """ Join chat server.
 
             Must be run after Chatter.create_udp_port().
+
+            :return True if successful joining the server, False otherwise.
         """
         logging.info('Joining the chat membership server...')
+
         # create an INET, STREAMing socket, and connect to the chat server
         self.s_server_tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.s_server_tcp.connect((self.chat_server['hostname'], self.chat_server['welcome_port']))
@@ -104,8 +110,58 @@ class Chatter:
         logging.debug('msg = {0}'.format(msg))
         self.send_tcp_msg(self.s_server_tcp, msg)
 
-        msg_server = self.receive_tcp_msg(self.s_server_tcp)
-        logging.debug('msg_server: {0}'.format(msg_server))
+        # Receive ACPT or RJCT message
+        response = self.receive_tcp_msg(self.s_server_tcp)
+        logging.debug('response: {0}'.format(response))
+
+        # Process response
+        if b'ACPT' in response:
+            logging.info('Membership server accepted connection with screen name: {}'
+                         .format(self.clients[0]['screen_name']))
+            self.process_client_list(response)
+        elif b'RJCT' in response:
+            logging.warning('Membership server rejected connection with screen name: {}'
+                            .format(self.clients[0]['screen_name']))
+            self.request_new_screen_name()
+            return False
+
+        return True
+
+    def process_client_list(self, response_str):
+        """ Process client list from ACPT message to self.clients list.
+
+            This method also checks the server returned the correct info for this client. If it does not, the connection
+            is closed, and the client exits with err_join.
+
+            :param  response_str    Full ACPT message.
+        """
+        # Remove everything except the list of clients, and separate the message into individual client info
+        logging.debug('response_str = {0}'.format(response_str))
+        client_list = str(response_str.decode(encoding='utf-8')).strip('ACPT ').rstrip('\n').split(':')
+        logging.debug('client_list = {0}'.format(client_list))
+
+        # Add each client to the clients structure
+        for client in client_list:
+            client_info = client.split(' ')
+            client_info[2] = int(client_info[2])
+            logging.debug('client_info = {0}'.format(client_info))
+
+            # Check if this is the info for this client or another client
+            if client_info[0] == self.clients[0]['screen_name']:
+                # Confirm IP and UDP port
+                if client_info[1] != self.clients[0]['ip'] or client_info[2] != self.clients[0]['udp_port']:
+                    logging.error('Server has the wrong IP and/or port for this client')
+                    self.exit_server()
+                    exit(err_join)
+                else:
+                    logging.info('Server has the correct IP and port for this client')
+            else:
+                # Add new client to clients structure
+                self.clients.append({'screen_name': client_info[0], 'ip': client_info[1], 'udp_port': client_info[2]})
+                logging.debug('Added new client: {0}'.format(self.clients[-1]))
+
+        logging.debug('self.clients = {0}'.format(self.clients))
+        logging.info('Client list filled')
 
     def receive_tcp_msg(self, conn):
         """ Receive message over TCP socket.
@@ -151,13 +207,25 @@ class Chatter:
         logging.debug('msg_leftovers_tcp: {0}'.format(self.msg_leftovers_tcp))
         return msg
 
+    def request_new_screen_name(self):
+        """ Request new screen name from the user.
+        """
+        new_name = input('The screen name {0} is not available. Please, enter a new screen name: '.format(self.clients[0]['screen_name']))
+        logging.debug('new_name = {0}'.format(new_name))
+
+        self.clients[0]['screen_name'] = str(new_name)
+
     def run(self):
         """ Run Chatter client.
         """
         logging.info('Starting Chatter...')
 
         self.create_udp_port()
-        self.join_server()
+
+        joined_server = False
+        while not joined_server:
+            joined_server = self.join_server()
+
         self.exit_server()
 
     def send_tcp_msg(self, conn, msg):
