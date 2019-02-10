@@ -16,6 +16,7 @@ import threading
 default_log_file = None         # Log messages will be printed to stdin
 default_log_level = 'WARN'
 
+# Exit codes
 err_ok = 0
 err_arg = 1
 
@@ -258,8 +259,8 @@ if __name__ == '__main__':
     parser.add_argument('screen_name', help='Screen name of chat user.')
     parser.add_argument('server_hostname', help='Hostname of chat server.')
     parser.add_argument('server_port', type=int, help='Port of chat server.')
-    parser.add_argument('-f', '--log-file', help='Log file path.')
-    parser.add_argument('-l', '--log-level', help='Verbosity level of the logger.')
+    parser.add_argument('-f', '--log-file', help='Log file path. Log will print to stdin by default.')
+    parser.add_argument('-l', '--log-level', help='Verbosity level of the logger. Uses WARN by default.')
 
     args = parser.parse_args()
 
