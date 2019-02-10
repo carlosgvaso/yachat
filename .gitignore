@@ -72,6 +72,7 @@ target/
 # PyCharm
 .idea/workspace.xml
 .idea/tasks.xml
+.idea/usage.statistics.xml
 
 # Jupyter Notebook
 .ipynb_checkpoints
