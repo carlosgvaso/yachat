@@ -69,6 +69,10 @@ docs/_build/
 # PyBuilder
 target/
 
+# PyCharm
+.idea/workspace.xml
+.idea/tasks.xml
+
 # Jupyter Notebook
 .ipynb_checkpoints
 
