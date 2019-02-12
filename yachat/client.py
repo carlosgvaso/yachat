@@ -78,8 +78,8 @@ class Chatter:
         logging.debug('Initial Chatter configuration:\n\tchat_server = {0}\n\tclients = {1}'
                       .format(self.chat_server, self.clients))
 
-    def create_udp_port(self):
-        """ Create UDP port to talk to other clients.
+    def create_udp_socket(self):
+        """ Create UDP socket to talk to other clients.
         """
         logging.info('Creating UDP socket...')
         # Find client's IP address
@@ -115,7 +115,7 @@ class Chatter:
     def join_server(self):
         """ Join chat server.
 
-            Must be run after Chatter.create_udp_port().
+            Must be run after Chatter.create_udp_socket().
 
             :return True if successful joining the server, False otherwise.
         """
@@ -343,7 +343,7 @@ class Chatter:
         """
         logging.info('Starting Chatter...')
 
-        self.create_udp_port()
+        self.create_udp_socket()
 
         joined_server = False
         while not joined_server and self.flag_run:
@@ -351,7 +351,7 @@ class Chatter:
 
         # Spawn listener and reader threads
         t_listener = Listener(0, 'listener-0', self.s_server_udp, self.q_listener)
-        t_reader = Reader(1, 'reader-1')
+        t_reader = Reader(1, 'reader-1', self.clients)
 
         t_listener.start()
         t_reader.start()
@@ -503,57 +503,118 @@ class Reader (threading.Thread):
     """ Console reader thread class.
     """
 
-    def __init__(self, thread_id, name, sleep_time=1):
+    def __init__(self, thread_id, name, clients, sender_timeout=1.0):
         """ Initialize instance variables.
 
-            :param  thread_id   Thread's numeric ID.
-            :param  name        Thread's name of the format "reader-<thread_id>".
-            :param  sleep_time  Time to pause in between loops in sec.
+            :param  thread_id       Thread's numeric ID.
+            :param  name            Thread's name of the format "reader-<thread_id>".
+            :param  clients         List of clients including this instance as per the Chatter.clients format.
+            :param  sender_timeout  Timeout to wait for a message to be sent. Default is 1 sec.
         """
         threading.Thread.__init__(self)
         self.thread_id = thread_id
-        self.name = name            # of the format: reader-<thread_id>
+        self.name = name    # of the format: reader-<thread_id>
+
         self.flag_run = True
-        self.sleep_time = sleep_time  # Time to pause in between loops in sec
+
+        self.clients = clients  # List of clients including this instance with their screen names, IPs and UDP ports
+        self.sender_timeout = sender_timeout    # Timeout to wait for a sender thread to return before going to the next
 
     def run(self):
         """ Run.
         """
         while self.flag_run:
-            # Do stuff
-            sleep(self.sleep_time)
+            # Read stdin input
+            msg_input = input('{0}: '.format(self.clients[0]['screen_name']))
+            logging.debug('msg_input = {0}'.format(msg_input))
+
+            # Send message to clients
+            self.send_message(msg_input)
+
+    def send_message(self, msg):
+        """ Spawn a Sender thread to send the message.
+
+            :param  msg Message to send as a string.
+        """
+        # Spawn a sender thread for each client in the server, and save to list
+        senders = list()
+        for i, client in enumerate(self.clients):
+            # Skip this client instance
+            if i != 0:
+                msg_processed = bytes(proto_udp_mesg.format(client['screen_name'], msg).encode(encoding='utf-8'))
+                t_sender = Sender(i, 'sender-{0}'.format(client['screen_name']), client, msg_processed)
+                t_sender.start()
+                senders.append(t_sender)
+
+        # Wait for the threads to finish
+        while len(senders) != 0:
+            for sender in senders:
+                sender.join(timeout=self.sender_timeout)
+                if not sender.is_alive():
+                    senders.remove(sender)
 
 
 class Sender (threading.Thread):
     """ Message sender thread class.
     """
 
-    def __init__(self, thread_id, name, message):
+    def __init__(self, thread_id, name, client, message):
         """ Initialize instance variables.
 
             :param  thread_id   Thread's numeric ID.
             :param  name        Thread's name of the format "sender-<thread_id>".
-            :param  message     Message to be sent as a string.
+            :param  client      Client info to which to send the message.
+            :param  message     Message to be sent as a bytes object.
         """
         threading.Thread.__init__(self)
         self.thread_id = thread_id  # Use socket port as the thread ID?
         self.name = name            # Of the format: sender-<thread_id>
+
+        self.client = client
+        self.s_client_udp = None    # UDP socket to talk to other clients
         self.msg = message
+
+    def create_udp_socket(self):
+        """ Create UDP socket ad connect to other client.
+        """
+        logging.info('Creating UDP socket to connect to {0}...'.format(self.client['screen_name']))
+
+        # Create a UDP socket
+        self.s_client_udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.s_client_udp.connect((self.client['ip'], self.client['udp_port']))
 
     def run(self):
         """ Run.
         """
-        # create an INET, STREAMing socket
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Create socket
+        self.create_udp_socket()
 
-        # now connect to the web server on port 80 - the normal http port
-        port = input("Port to connect to: ")
-        s.connect(("127.0.0.1", port))
-        msg = input("Type message: ")
-        s.send(bytes(msg))
-        msg_from_server = str(s.recv(2048))
+        # Send message
+        self.send_udp_msg(self.s_client_udp, self.msg)
 
-        print("FROM SERVER: " + msg_from_server)
+    def send_udp_msg(self, conn, msg):
+        """ Send message over UDP socket.
+
+            :param  conn    Socket connection.
+            :param  msg     Bytes object to send.
+            :return Length in bytes of the message sent.
+
+            TODO: Make safe for faulty socket connection.
+        """
+        logging.debug('msg: {0}'.format(msg))
+        msg_len = len(msg)
+        logging.debug('msg_len: {0}'.format(msg_len))
+        msg_sent = 0
+
+        while msg_sent < msg_len:
+            sent = conn.send(msg[msg_sent:])
+            if sent == 0:
+                raise RuntimeError("Socket connection broken")
+            msg_sent += sent
+
+            logging.debug('msg_sent: {0}'.format(msg_sent))
+
+        return msg_sent
 
 
 ##
