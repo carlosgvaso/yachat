@@ -41,12 +41,13 @@ class Chatter:
     """ Chat client main class.
     """
 
-    def __init__(self, screen_name, server_hostname, server_welcome_port, sleep_time=1):
+    def __init__(self, screen_name, server_hostname, server_welcome_port, retries=10, sleep_time=1):
         """ Initialize instance variables.
 
             :param  screen_name         Username to register in the membership server.
             :param  server_hostname     Chat membership server's hostname.
             :param  server_welcome_port Welcome port of the chat membership server.
+            :param  retries             Connection retries before quiting.
             :param  sleep_time          Time to pause in between loops in sec.
         """
         # Membership server info in the format:
@@ -73,6 +74,7 @@ class Chatter:
         self.s_server_tcp = None    # TCP port connected to the chat membership server
         self.s_server_udp = None    # UDP server port to listen for and send messages
 
+        self.retries = retries              # Connection retries before quiting
         self.sleep_time = sleep_time        # Time to pause in between loops in sec
 
         logging.debug('Initial Chatter configuration:\n\tchat_server = {0}\n\tclients = {1}'
@@ -80,18 +82,39 @@ class Chatter:
 
     def create_udp_socket(self):
         """ Create UDP socket to talk to other clients.
+
+            :return True if success, False otherwise.
         """
         logging.info('Creating UDP socket...')
         # Find client's IP address
-        self.clients[0]['ip'] = socket.gethostbyname(socket.gethostname())
+        try:
+            self.clients[0]['ip'] = socket.gethostbyname(socket.gethostname())
+        except OSError as e1:
+            logging.error('Could not obtain the local IP: {0}'.format(e1))
+            return False
 
         # Create a UDP socket
-        self.s_server_udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.s_server_udp.bind((self.clients[0]['ip'], 0))
+        try:
+            self.s_server_udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.s_server_udp.bind((self.clients[0]['ip'], 0))
+        except OSError as e1:
+            logging.error('Could not create the UDP socket: {0}'.format(e1))
+            return False
 
         # Save IP and port
         self.clients[0]['ip'], self.clients[0]['udp_port'] = self.s_server_udp.getsockname()
         logging.debug('UDP socket: ip = {0}, port = {1}'.format(self.clients[0]['ip'], self.clients[0]['udp_port']))
+
+        return True
+
+    def close_udp_socket(self):
+        """ Safely close the UDP socket
+        """
+        logging.debug('Closing UDP socket...')
+        try:
+            self.s_server_udp.close()
+        except OSError as e1:
+            logging.error('Could not close the UDP socket: {0}'.format(e1))
 
     def exit_server(self):
         """ Exit chat server.
@@ -107,10 +130,16 @@ class Chatter:
         msg = bytes(proto_tcp_exit.encode(encoding='utf-8'))
         logging.debug('msg = {0}'.format(msg))
 
-        self.send_tcp_msg(self.s_server_tcp, msg)
+        try:
+            self.send_tcp_msg(self.s_server_tcp, msg)
+        except OSError as e1:
+            logging.error('Could not properly exit the server: {0}'.format(e1))
 
-        #self.s_server_tcp.shutdown()
-        self.s_server_tcp.close()
+        try:
+            self.s_server_tcp.shutdown(socket.SOCK_STREAM)
+            self.s_server_tcp.close()
+        except OSError as e1:
+            logging.error('Could not properly close the TCP socket: {0}'.format(e1))
 
     def join_server(self):
         """ Join chat server.
@@ -122,8 +151,18 @@ class Chatter:
         logging.info('Joining the chat membership server...')
 
         # create TCP socket, and connect to the chat server
-        self.s_server_tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.s_server_tcp.connect((self.chat_server['hostname'], self.chat_server['welcome_port']))
+        try:
+            self.s_server_tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.s_server_tcp.connect((self.chat_server['hostname'], self.chat_server['welcome_port']))
+        except OSError as e1:
+            logging.error('Failed to create TCP socket: {0}'.format(e1))
+            return False
+        except ConnectionRefusedError as e2:
+            logging.error('Failed to connect to server: {0}'.format(e2))
+            return False
+        except InterruptedError as e3:
+            logging.error('Connection to server interrupted: {0}'.format(e3))
+            return False
 
         msg = bytes(proto_tcp_helo
                     .format(self.clients[0]['screen_name'], self.clients[0]['ip'], self.clients[0]['udp_port'])
@@ -343,11 +382,40 @@ class Chatter:
         """
         logging.info('Starting Chatter...')
 
-        self.create_udp_socket()
+        count = 0
+        created_socket = False
+        while not created_socket and count < self.retries and self.flag_run:
+            created_socket = self.create_udp_socket()
+            count += 1
+            logging.debug('Tries: {0}'.format(count))
 
+        if count == self.retries:
+            logging.critical('Reached the maximum connection attempts. Exiting...')
+            self.close_udp_socket()
+            exit(err_join)
+        elif not self.flag_run:
+            logging.debug('Received signal to exit. Exiting..')
+            self.close_udp_socket()
+            exit(err_user)
+
+        count = 0
         joined_server = False
-        while not joined_server and self.flag_run:
+        while not joined_server and count < self.retries and self.flag_run:
             joined_server = self.join_server()
+            count += 1
+            logging.debug('Tries: {0}'.format(count))
+
+        # Exit in error if we failed connecting to the server
+        if count == self.retries:
+            logging.critical('Reached the maximum connection attempts. Exiting...')
+            self.close_udp_socket()
+            self.exit_server()
+            exit(err_join)
+        elif not self.flag_run:
+            logging.debug('Received signal to exit. Exiting..')
+            self.close_udp_socket()
+            self.exit_server()
+            exit(err_user)
 
         # Spawn listener and reader threads
         t_listener = Listener(0, 'listener-0', self.s_server_udp, self.q_listener)
@@ -377,6 +445,8 @@ class Chatter:
 
         t_listener.join()
         t_reader.join()
+
+        self.close_udp_socket()
 
         # Read listener queue
         while not self.q_listener.empty():
