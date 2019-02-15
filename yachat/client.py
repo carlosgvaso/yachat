@@ -33,6 +33,9 @@ proto_udp_exit = 'EXIT {0}\n'           # EXIT <screen_name>\n
 # Signals
 signals_to_names = dict((getattr(signal, n), n) for n in dir(signal) if n.startswith('SIG') and '_' not in n)
 
+# Flags
+run_flag = None
+
 
 ##
 # Classes
@@ -66,7 +69,8 @@ class Chatter:
         self.q_reader = queue.Queue()  # Reader thread queue
 
         # Flags and signal handlers
-        self.flag_run = True
+        global run_flag
+        run_flag = True            # Global flag
         self.original_sigint = None
         self.original_sigterm = None
 
@@ -190,13 +194,15 @@ class Chatter:
     def stop(self, sig, func=None):
         """ Do required tasks to stop the client.
         """
+        global run_flag
+
         # Restore the original signal handlers to allow to stop forcefully
         signal.signal(signal.SIGINT, self.original_sigint)
         signal.signal(signal.SIGTERM, self.original_sigterm)
 
         logging.warning('Signal %s received: Exiting gracefully (you can press [Ctrl]+[D] again to stop forcefully)...',
                         signals_to_names[sig])
-        self.flag_run = False
+        run_flag = False
 
     def process_client_list(self, response_str):
         """ Process client list from ACPT message to self.clients list.
@@ -384,26 +390,32 @@ class Chatter:
 
         count = 0
         created_socket = False
-        while not created_socket and count < self.retries and self.flag_run:
+        while not created_socket and count < self.retries and run_flag:
             created_socket = self.create_udp_socket()
             count += 1
             logging.debug('Tries: {0}'.format(count))
+
+            # Do nothing
+            sleep(self.sleep_time * 2)
 
         if count == self.retries:
             logging.critical('Reached the maximum connection attempts. Exiting...')
             self.close_udp_socket()
             exit(err_join)
-        elif not self.flag_run:
+        elif not run_flag:
             logging.debug('Received signal to exit. Exiting..')
             self.close_udp_socket()
             exit(err_user)
 
         count = 0
         joined_server = False
-        while not joined_server and count < self.retries and self.flag_run:
+        while not joined_server and count < self.retries and run_flag:
             joined_server = self.join_server()
             count += 1
             logging.debug('Tries: {0}'.format(count))
+
+            # Do nothing
+            sleep(self.sleep_time * 2)
 
         # Exit in error if we failed connecting to the server
         if count == self.retries:
@@ -411,7 +423,7 @@ class Chatter:
             self.close_udp_socket()
             self.exit_server()
             exit(err_join)
-        elif not self.flag_run:
+        elif not run_flag:
             logging.debug('Received signal to exit. Exiting..')
             self.close_udp_socket()
             self.exit_server()
@@ -425,7 +437,7 @@ class Chatter:
         t_reader.start()
 
         # Loop until we are told to stop running
-        while self.flag_run:
+        while run_flag:
             # Read listener queue, and process message
             if not self.q_listener.empty():
                 msg_listener = self.q_listener.get(block=False)
@@ -435,6 +447,8 @@ class Chatter:
 
             # Do nothing
             sleep(self.sleep_time)
+
+        logging.debug('run_flag = {0}'.format(run_flag))
 
         # Send stop message to server
         self.exit_server()
@@ -585,7 +599,8 @@ class Reader (threading.Thread):
         self.thread_id = thread_id
         self.name = name    # of the format: reader-<thread_id>
 
-        self.flag_run = True
+        self.flag_run = True    # Flag used by Chatter to stop this thread
+        self.run_flag = True    # Global flag used to tell Chatter to stop
 
         self.clients = clients  # List of clients including this instance with their screen names, IPs and UDP ports
         self.sender_timeout = sender_timeout    # Timeout to wait for a sender thread to return before going to the next
@@ -593,10 +608,17 @@ class Reader (threading.Thread):
     def run(self):
         """ Run.
         """
+        global run_flag
+
         while self.flag_run:
             # Read stdin input
-            msg_input = input('{0}: '.format(self.clients[0]['screen_name']))
-            logging.debug('msg_input = {0}'.format(msg_input))
+            try:
+                msg_input = input('{0}: '.format(self.clients[0]['screen_name']))
+                logging.debug('msg_input = {0}'.format(msg_input))
+            except EOFError:
+                logging.warning('Ctrl+D input detected. Sending exit signal...')
+                run_flag = False
+                return
 
             # Send message to clients
             self.send_message(msg_input)
