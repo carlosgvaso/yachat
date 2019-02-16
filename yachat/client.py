@@ -5,6 +5,7 @@ import logging          # Logging
 import signal           # Signal managing
 from time import sleep  # Sleeping
 import socket           # TCP and UDP sockets
+import select           # Poll socket for incoming data
 import threading        # Multi-threading
 import queue            # Queue to share data between threads
 
@@ -13,13 +14,14 @@ import queue            # Queue to share data between threads
 # Globals
 ##########
 default_log_file = None         # Log messages will be printed to stdin
-default_log_level = 'WARN'
+default_log_level = 'ERROR'
 
 # Exit codes
 err_ok = 0
 err_arg = 1
 err_join = 2
 err_user = 3
+err_exit = 4
 
 # Protocol
 proto_tcp_helo = 'HELO {0} {1} {2}\n'   # HELO <screen_name> <IP> <Port>\n
@@ -44,7 +46,7 @@ class Chatter:
     """ Chat client main class.
     """
 
-    def __init__(self, screen_name, server_hostname, server_welcome_port, retries=10, sleep_time=1):
+    def __init__(self, screen_name, server_hostname, server_welcome_port, retries=10, sleep_time=0.2):
         """ Initialize instance variables.
 
             :param  screen_name         Username to register in the membership server.
@@ -66,7 +68,6 @@ class Chatter:
         # Other data structures
         self.msg_leftovers_tcp = bytes()  # If we receive the beginning of the next msg, save it here
         self.q_listener = queue.Queue()  # Listener thread queue
-        self.q_reader = queue.Queue()  # Reader thread queue
 
         # Flags and signal handlers
         global run_flag
@@ -100,6 +101,7 @@ class Chatter:
         # Create a UDP socket
         try:
             self.s_server_udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.s_server_udp.setblocking(False)
             self.s_server_udp.bind((self.clients[0]['ip'], 0))
         except OSError as e1:
             logging.error('Could not create the UDP socket: {0}'.format(e1))
@@ -124,10 +126,6 @@ class Chatter:
         """ Exit chat server.
 
             Must be run after Chatter.join_server().
-
-            TODO:
-                - Confirm exit using server's UDP exit confirmation.
-                - Check the socket exists and it is connected.
         """
         logging.info('Exiting server...')
 
@@ -136,7 +134,7 @@ class Chatter:
 
         try:
             self.send_tcp_msg(self.s_server_tcp, msg)
-        except OSError as e1:
+        except (OSError, InterruptedError, RuntimeError) as e1:
             logging.error('Could not properly exit the server: {0}'.format(e1))
 
         try:
@@ -144,6 +142,18 @@ class Chatter:
             self.s_server_tcp.close()
         except OSError as e1:
             logging.error('Could not properly close the TCP socket: {0}'.format(e1))
+
+    def exited_server(self, msg):
+        """ Check we receive the EXIT message confirmation from the server.
+
+            :param  msg Bytes object with the message from the server.
+            :return True if the message was received, false otherwise
+        """
+        msg_str = str(msg.decode(encoding='utf-8'))
+
+        if msg_str == proto_udp_exit.format(self.clients[0]['screen_name']):
+            return True
+        return False
 
     def join_server(self):
         """ Join chat server.
@@ -160,23 +170,56 @@ class Chatter:
             self.s_server_tcp.connect((self.chat_server['hostname'], self.chat_server['welcome_port']))
         except OSError as e1:
             logging.error('Failed to create TCP socket: {0}'.format(e1))
+            try:
+                self.s_server_tcp.shutdown(socket.SOCK_STREAM)
+                self.s_server_tcp.close()
+            except OSError as e2:
+                logging.error('Could not properly close the TCP socket: {0}'.format(e2))
             return False
-        except ConnectionRefusedError as e2:
-            logging.error('Failed to connect to server: {0}'.format(e2))
+        except ConnectionRefusedError as e1:
+            logging.error('Failed to connect to server: {0}'.format(e1))
+            try:
+                self.s_server_tcp.shutdown(socket.SOCK_STREAM)
+                self.s_server_tcp.close()
+            except OSError as e2:
+                logging.error('Could not properly close the TCP socket: {0}'.format(e2))
             return False
-        except InterruptedError as e3:
-            logging.error('Connection to server interrupted: {0}'.format(e3))
+        except InterruptedError as e1:
+            logging.error('Connection to server interrupted: {0}'.format(e1))
+            try:
+                self.s_server_tcp.shutdown(socket.SOCK_STREAM)
+                self.s_server_tcp.close()
+            except OSError as e2:
+                logging.error('Could not properly close the TCP socket: {0}'.format(e2))
             return False
 
         msg = bytes(proto_tcp_helo
                     .format(self.clients[0]['screen_name'], self.clients[0]['ip'], self.clients[0]['udp_port'])
                     .encode(encoding='utf-8'))
         logging.debug('msg = {0}'.format(msg))
-        self.send_tcp_msg(self.s_server_tcp, msg)
+        try:
+            self.send_tcp_msg(self.s_server_tcp, msg)
+        except (OSError, InterruptedError, RuntimeError) as e1:
+            logging.error('Could not sent HELO message: {0}'.format(e1))
+            try:
+                self.s_server_tcp.shutdown(socket.SOCK_STREAM)
+                self.s_server_tcp.close()
+            except OSError as e2:
+                logging.error('Could not properly close the TCP socket: {0}'.format(e2))
+            return False
 
         # Receive ACPT or RJCT message
-        response = self.receive_tcp_msg(self.s_server_tcp)
-        logging.debug('response: {0}'.format(response))
+        try:
+            response = self.receive_tcp_msg(self.s_server_tcp)
+            logging.debug('response: {0}'.format(response))
+        except (OSError, InterruptedError, RuntimeError) as e1:
+            logging.error('Did not received HELO response: {0}'.format(e1))
+            try:
+                self.s_server_tcp.shutdown(socket.SOCK_STREAM)
+                self.s_server_tcp.close()
+            except OSError as e2:
+                logging.error('Could not properly close the TCP socket: {0}'.format(e2))
+            return False
 
         # Process response
         if b'ACPT' in response:
@@ -186,23 +229,24 @@ class Chatter:
         elif b'RJCT' in response:
             logging.warning('Membership server rejected connection with screen name: {}'
                             .format(self.clients[0]['screen_name']))
+            try:
+                self.s_server_tcp.shutdown(socket.SOCK_STREAM)
+                self.s_server_tcp.close()
+            except OSError as e2:
+                logging.error('Could not properly close the TCP socket: {0}'.format(e2))
+
             self.request_new_screen_name()
+            return False
+        else:
+            logging.error('Received unknown message: {0}'.format(response))
+            try:
+                self.s_server_tcp.shutdown(socket.SOCK_STREAM)
+                self.s_server_tcp.close()
+            except OSError as e2:
+                logging.error('Could not properly close the TCP socket: {0}'.format(e2))
             return False
 
         return True
-
-    def stop(self, sig, func=None):
-        """ Do required tasks to stop the client.
-        """
-        global run_flag
-
-        # Restore the original signal handlers to allow to stop forcefully
-        signal.signal(signal.SIGINT, self.original_sigint)
-        signal.signal(signal.SIGTERM, self.original_sigterm)
-
-        logging.warning('Signal %s received: Exiting gracefully (you can press [Ctrl]+[D] again to stop forcefully)...',
-                        signals_to_names[sig])
-        run_flag = False
 
     def process_client_list(self, response_str):
         """ Process client list from ACPT message to self.clients list.
@@ -228,10 +272,13 @@ class Chatter:
                 # Confirm IP and UDP port
                 if client_info[1] != self.clients[0]['ip'] or client_info[2] != self.clients[0]['udp_port']:
                     logging.error('Server has the wrong IP and/or port for this client')
-                    self.stop(signal.SIGTERM)
+                    global run_flag
+                    run_flag = False
+                    #self.stop(signal.SIGTERM)
                     return
                 else:
                     logging.info('Server has the correct IP and port for this client')
+                    print('{0} accepted to the chatroom'.format(self.clients[0]['screen_name']))
             else:
                 # Add new client to clients structure
                 self.clients.append({'screen_name': client_info[0], 'ip': client_info[1], 'udp_port': client_info[2]})
@@ -329,8 +376,6 @@ class Chatter:
 
             :param  conn    TCP socket connection.
             :return Message received as a bytes object.
-
-            TODO: Make safe for faulty socket connection.
         """
         receiving = True
 
@@ -349,20 +394,22 @@ class Chatter:
         else:
             msg = bytes()
 
-        while receiving:
-            chunk = conn.recv(2048)
+        while receiving and run_flag:
+            ready = select.select([self.s_server_tcp], [], [], 0.5)[0]
+            if ready:
+                chunk = conn.recv(2048)
 
-            if b'\n' in chunk:
-                receiving = False
+                if b'\n' in chunk:
+                    receiving = False
 
-                b_tmp = chunk.split(b'\n')
-                chunk = b_tmp[0] + b'\n'
-                self.msg_leftovers_tcp = b'\n'.join(b_tmp[1:])
-            elif chunk == b'':
-                raise RuntimeError("Socket connection broken")
+                    b_tmp = chunk.split(b'\n')
+                    chunk = b_tmp[0] + b'\n'
+                    self.msg_leftovers_tcp = b'\n'.join(b_tmp[1:])
+                elif chunk == b'':
+                    raise RuntimeError("Socket connection broken")
 
-            msg += chunk
-            logging.debug('chunk: {0}'.format(chunk))
+                msg += chunk
+                logging.debug('chunk: {0}'.format(chunk))
 
         logging.debug('msg: {0}'.format(msg))
         logging.debug('msg_leftovers_udp: {0}'.format(self.msg_leftovers_tcp))
@@ -376,7 +423,10 @@ class Chatter:
                              .format(self.clients[0]['screen_name']))
         except EOFError:
             print()
-            self.stop(signal.SIGTERM)
+            logging.warning('Ctrl+D input detected. Sending exit signal...')
+            global run_flag
+            run_flag = False
+            #self.stop(signal.SIGTERM)
             return
 
         logging.debug('new_name = {0}'.format(new_name))
@@ -387,32 +437,37 @@ class Chatter:
         """ Run Chatter client.
         """
         logging.info('Starting Chatter...')
+        global run_flag
 
         count = 0
         created_socket = False
         while not created_socket and count < self.retries and run_flag:
-            created_socket = self.create_udp_socket()
             count += 1
             logging.debug('Tries: {0}'.format(count))
+
+            created_socket = self.create_udp_socket()
 
             # Do nothing
             sleep(self.sleep_time * 2)
 
         if count == self.retries:
             logging.critical('Reached the maximum connection attempts. Exiting...')
+            run_flag = False
             self.close_udp_socket()
             exit(err_join)
         elif not run_flag:
             logging.debug('Received signal to exit. Exiting..')
+            run_flag = False
             self.close_udp_socket()
             exit(err_user)
 
         count = 0
         joined_server = False
         while not joined_server and count < self.retries and run_flag:
-            joined_server = self.join_server()
             count += 1
             logging.debug('Tries: {0}'.format(count))
+
+            joined_server = self.join_server()
 
             # Do nothing
             sleep(self.sleep_time * 2)
@@ -420,51 +475,88 @@ class Chatter:
         # Exit in error if we failed connecting to the server
         if count == self.retries:
             logging.critical('Reached the maximum connection attempts. Exiting...')
+            run_flag = False
             self.close_udp_socket()
             self.exit_server()
             exit(err_join)
         elif not run_flag:
             logging.debug('Received signal to exit. Exiting..')
+            run_flag = False
             self.close_udp_socket()
             self.exit_server()
             exit(err_user)
 
         # Spawn listener and reader threads
-        t_listener = Listener(0, 'listener-0', self.s_server_udp, self.q_listener)
-        t_reader = Reader(1, 'reader-1', self.clients)
+        try:
+            t_listener = Listener(0, 'listener-0', self.s_server_udp, self.q_listener)
+            t_listener.daemon = True
+            t_reader = Reader(1, 'reader-1', self.clients)
+            t_reader.daemon = True
 
-        t_listener.start()
-        t_reader.start()
+            t_listener.start()
+            t_reader.start()
 
         # Loop until we are told to stop running
-        while run_flag:
-            # Read listener queue, and process message
+            while run_flag:
+                # Read listener queue, and process message
+                if not self.q_listener.empty():
+                    msg_listener = self.q_listener.get(block=False)
+                    logging.debug('Listener received: {0}'.format(msg_listener))
+
+                    self.process_udp_messages(msg_listener)
+
+                # Do nothing
+                sleep(self.sleep_time)
+        except KeyboardInterrupt:
+            logging.warning('Received SIGINT signal. Exiting...')
+            exit(err_exit)
+
+        logging.debug('run_flag = {0}'.format(run_flag))
+
+        # Stop reader thread, and wait for it to terminate
+        # This doesn't work because the reader is waiting for user input. However, the reader should have exited itself
+        # when it got the Ctrl+D, or it will be killed forcefully when the client exits.
+        if t_reader.is_alive():
+            logging.debug('Stopping reader thread...')
+            t_reader.flag_run = False
+            #t_reader.join()
+
+        # Send stop message to server
+        logging.debug('Exiting server...')
+        self.exit_server()
+
+        # Read listener queue for the exit message
+        count = 0
+        exited_server = False
+        while not exited_server and count < self.retries:
+            count += 1
+            logging.debug('Tries: {0}'.format(count))
+
             if not self.q_listener.empty():
                 msg_listener = self.q_listener.get(block=False)
                 logging.debug('Listener received: {0}'.format(msg_listener))
-
-                self.process_udp_messages(msg_listener)
+                exited_server = self.exited_server(msg_listener)
+                logging.debug('exited_server = {0}'.format(exited_server))
+            else:
+                logging.debug('Queue is empty')
 
             # Do nothing
             sleep(self.sleep_time)
 
-        logging.debug('run_flag = {0}'.format(run_flag))
-
-        # Send stop message to server
-        self.exit_server()
-
-        # Stop all threads, and wait for them to terminate
+        # Stop the listener thread and close UDP socket
+        logging.debug('Stopping listener thread...')
         t_listener.flag_run = False
-        t_reader.flag_run = False
-
         t_listener.join()
-        t_reader.join()
 
+        logging.debug('Closing UDP socket...')
         self.close_udp_socket()
 
-        # Read listener queue
-        while not self.q_listener.empty():
-            logging.debug('Listener received: {0}'.format(self.q_listener.get(block=False)))
+        # Exit in error if we failed connecting to the server
+        if count == self.retries:
+            logging.critical('Reached the maximum attempts while exiting the server. Exiting...')
+            exit(err_exit)
+
+        exit(err_ok)
 
     def send_tcp_msg(self, conn, msg):
         """ Send message over TCP socket.
@@ -472,8 +564,6 @@ class Chatter:
             :param  conn    Socket connection.
             :param  msg     Bytes object to send.
             :return Length in bytes of the message sent.
-
-            TODO: Make safe for faulty socket connection.
         """
         logging.debug('msg: {0}'.format(msg))
         msg_len = len(msg)
@@ -501,12 +591,25 @@ class Chatter:
         signal.signal(signal.SIGTERM, func)
         signal.signal(signal.SIGINT, func)
 
+    def stop(self, sig, func=None):
+        """ Do required tasks to stop the client.
+        """
+        global run_flag
+
+        # Restore the original signal handlers to allow to stop forcefully
+        signal.signal(signal.SIGINT, self.original_sigint)
+        signal.signal(signal.SIGTERM, self.original_sigterm)
+
+        logging.warning('Signal %s received: Exiting gracefully (you can press [Ctrl]+[C] again to stop forcefully)...',
+                        signals_to_names[sig])
+        run_flag = False
+
 
 class Listener (threading.Thread):
     """ Socket listener thread class.
     """
 
-    def __init__(self, thread_id, name, udp_socket, msg_queue, sleep_time=1):
+    def __init__(self, thread_id, name, udp_socket, msg_queue, sleep_time=0.2):
         """ Initialize instance variables.
 
             :param  thread_id   Thread's numeric ID.
@@ -532,8 +635,6 @@ class Listener (threading.Thread):
 
             :param  conn    UDP socket connection.
             :return Message received as a bytes object.
-
-            TODO: Make safe for faulty socket connection.
         """
         receiving = True
 
@@ -552,20 +653,22 @@ class Listener (threading.Thread):
         else:
             msg = bytes()
 
-        while receiving:
-            chunk = conn.recv(2048)
+        while receiving and self.flag_run:
+            ready = select.select([self.udp_socket], [], [], 0.5)[0]
+            if ready:
+                chunk = conn.recv(2048)
 
-            if b'\n' in chunk:
-                receiving = False
+                if b'\n' in chunk:
+                    receiving = False
 
-                b_tmp = chunk.split(b'\n')
-                chunk = b_tmp[0] + b'\n'
-                self.msg_leftovers_udp = b'\n'.join(b_tmp[1:])
-            elif chunk == b'':
-                raise RuntimeError("Socket connection broken")
+                    b_tmp = chunk.split(b'\n')
+                    chunk = b_tmp[0] + b'\n'
+                    self.msg_leftovers_udp = b'\n'.join(b_tmp[1:])
+                elif chunk == b'':
+                    raise RuntimeError("Socket connection broken")
 
-            msg += chunk
-            logging.debug('chunk: {0}'.format(chunk))
+                msg += chunk
+                logging.debug('chunk: {0}'.format(chunk))
 
         logging.debug('msg: {0}'.format(msg))
         logging.debug('msg_leftovers_udp: {0}'.format(self.msg_leftovers_udp))
@@ -576,11 +679,19 @@ class Listener (threading.Thread):
         """
         while self.flag_run:
             # Listen to UDP socket and put received messages in queue
-            received = self.receive_udp_msg(self.udp_socket)
-            self.msg_queue.put(received)
+            try:
+                received = self.receive_udp_msg(self.udp_socket)
+                self.msg_queue.put(received)
+            except (OSError, InterruptedError, RuntimeError) as e1:
+                logging.error('Failed receiving UDP message: {0}'.format(e1))
+            except (KeyboardInterrupt, SystemExit):
+                logging.warning('Received SIGINT signal. Exiting: {0}...'.format(self.name))
+                return
 
             # Do nothing
             sleep(self.sleep_time)
+
+        logging.debug('Received signal to exit from main thread. Exiting: {0}...'.format(self.name))
 
 
 class Reader (threading.Thread):
@@ -599,7 +710,7 @@ class Reader (threading.Thread):
         self.thread_id = thread_id
         self.name = name    # of the format: reader-<thread_id>
 
-        self.flag_run = True    # Flag used by Chatter to stop this thread
+        self.flag_run = True    # Flag used by main thread to stop this thread
         self.run_flag = True    # Global flag used to tell Chatter to stop
 
         self.clients = clients  # List of clients including this instance with their screen names, IPs and UDP ports
@@ -617,11 +728,19 @@ class Reader (threading.Thread):
                 logging.debug('msg_input = {0}'.format(msg_input))
             except EOFError:
                 logging.warning('Ctrl+D input detected. Sending exit signal...')
+                self.flag_run = False
                 run_flag = False
+
+                logging.debug('Received signal to exit from user. Exiting: {0}...'.format(self.name))
+                return
+            except (KeyboardInterrupt, SystemExit):
+                logging.warning('Received SIGINT signal. Exiting: {0}...'.format(self.name))
                 return
 
             # Send message to clients
             self.send_message(msg_input)
+
+        logging.debug('Received signal to exit from main thread. Exiting: {0}...'.format(self.name))
 
     def send_message(self, msg):
         """ Spawn a Sender thread to send the message.
@@ -679,10 +798,18 @@ class Sender (threading.Thread):
         """ Run.
         """
         # Create socket
-        self.create_udp_socket()
+        try:
+            self.create_udp_socket()
+        except OSError as e1:
+            logging.error('Could not create UDP socket to send message: {0}'.format(e1))
+            return
 
         # Send message
-        self.send_udp_msg(self.s_client_udp, self.msg)
+        try:
+            self.send_udp_msg(self.s_client_udp, self.msg)
+        except (OSError, InterruptedError, RuntimeError) as e1:
+            logging.error('Failed sending UDP message: {0}'.format(e1))
+            return
 
     def send_udp_msg(self, conn, msg):
         """ Send message over UDP socket.
@@ -690,8 +817,6 @@ class Sender (threading.Thread):
             :param  conn    Socket connection.
             :param  msg     Bytes object to send.
             :return Length in bytes of the message sent.
-
-            TODO: Make safe for faulty socket connection.
         """
         logging.debug('msg: {0}'.format(msg))
         msg_len = len(msg)
@@ -735,14 +860,14 @@ if __name__ == '__main__':
         logging.critical('Wrong log level provided: {0}'.format(args.log_level))
         exit(err_arg)
 
-    logging.basicConfig(format="%(asctime)s %(levelname)s:%(module)s:%(funcName)s: %(message)s",
+    logging.basicConfig(format="%(asctime)s %(levelname)s:%(processName)s:%(threadName)s:%(funcName)s: %(message)s",
                         filename=args.log_file, level=log_level)
 
     logging.debug('Arguments: {0}'.format(args))
 
     # Create, set up signal handler and run Chatter object
     chatter = Chatter(args.screen_name, args.server_hostname, args.server_port)
-    chatter.set_exit_handler(chatter.stop)
+    #chatter.set_exit_handler(chatter.stop)     # Hndles the SIGINT  signal (Ctrl+C) to exit gracefully
     chatter.run()
 
     exit(err_ok)
