@@ -350,8 +350,8 @@ class Chatter:
             logging.error('Wrong message type received for processing: {0}'.format(msg_list))
             return
 
-        logging.info('Message received: {0} {1}'.format(msg_list[1], msg_list[2]))
-        print('{0} {1}'.format(msg_list[1], msg_list[2]))
+        logging.info('Message received: {0} {1}'.format(msg_list[1], ' '.join(msg_list[2:])))
+        print('{0} {1}'.format(msg_list[1], ' '.join(msg_list[2:])))
 
     def process_udp_messages(self, msg):
         """ Process messages received over UDP.
