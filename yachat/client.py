@@ -845,7 +845,7 @@ if __name__ == '__main__':
     parser.add_argument('server_hostname', help='Hostname of chat server.')
     parser.add_argument('server_port', type=int, help='Port of chat server.')
     parser.add_argument('-f', '--log-file', help='Log file path. Log will print to stdin by default.')
-    parser.add_argument('-l', '--log-level', help='Verbosity level of the logger. Uses WARN by default.')
+    parser.add_argument('-l', '--log-level', help='Verbosity level of the logger. Uses ERROR by default.')
 
     args = parser.parse_args()
 
