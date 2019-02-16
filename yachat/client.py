@@ -138,7 +138,7 @@ class Chatter:
             logging.error('Could not properly exit the server: {0}'.format(e1))
 
         try:
-            self.s_server_tcp.shutdown(socket.SOCK_STREAM)
+            self.s_server_tcp.shutdown(socket.SHUT_WR)
             self.s_server_tcp.close()
         except OSError as e1:
             logging.error('Could not properly close the TCP socket: {0}'.format(e1))
@@ -171,7 +171,7 @@ class Chatter:
         except OSError as e1:
             logging.error('Failed to create TCP socket: {0}'.format(e1))
             try:
-                self.s_server_tcp.shutdown(socket.SOCK_STREAM)
+                self.s_server_tcp.shutdown(socket.SHUT_WR)
                 self.s_server_tcp.close()
             except OSError as e2:
                 logging.error('Could not properly close the TCP socket: {0}'.format(e2))
@@ -179,7 +179,7 @@ class Chatter:
         except ConnectionRefusedError as e1:
             logging.error('Failed to connect to server: {0}'.format(e1))
             try:
-                self.s_server_tcp.shutdown(socket.SOCK_STREAM)
+                self.s_server_tcp.shutdown(socket.SHUT_WR)
                 self.s_server_tcp.close()
             except OSError as e2:
                 logging.error('Could not properly close the TCP socket: {0}'.format(e2))
@@ -187,7 +187,7 @@ class Chatter:
         except InterruptedError as e1:
             logging.error('Connection to server interrupted: {0}'.format(e1))
             try:
-                self.s_server_tcp.shutdown(socket.SOCK_STREAM)
+                self.s_server_tcp.shutdown(socket.SHUT_WR)
                 self.s_server_tcp.close()
             except OSError as e2:
                 logging.error('Could not properly close the TCP socket: {0}'.format(e2))
@@ -202,7 +202,7 @@ class Chatter:
         except (OSError, InterruptedError, RuntimeError) as e1:
             logging.error('Could not sent HELO message: {0}'.format(e1))
             try:
-                self.s_server_tcp.shutdown(socket.SOCK_STREAM)
+                self.s_server_tcp.shutdown(socket.SHUT_WR)
                 self.s_server_tcp.close()
             except OSError as e2:
                 logging.error('Could not properly close the TCP socket: {0}'.format(e2))
@@ -215,7 +215,7 @@ class Chatter:
         except (OSError, InterruptedError, RuntimeError) as e1:
             logging.error('Did not received HELO response: {0}'.format(e1))
             try:
-                self.s_server_tcp.shutdown(socket.SOCK_STREAM)
+                self.s_server_tcp.shutdown(socket.SHUT_WR)
                 self.s_server_tcp.close()
             except OSError as e2:
                 logging.error('Could not properly close the TCP socket: {0}'.format(e2))
@@ -230,7 +230,7 @@ class Chatter:
             logging.warning('Membership server rejected connection with screen name: {}'
                             .format(self.clients[0]['screen_name']))
             try:
-                self.s_server_tcp.shutdown(socket.SOCK_STREAM)
+                self.s_server_tcp.shutdown(socket.SHUT_WR)
                 self.s_server_tcp.close()
             except OSError as e2:
                 logging.error('Could not properly close the TCP socket: {0}'.format(e2))
@@ -240,7 +240,7 @@ class Chatter:
         else:
             logging.error('Received unknown message: {0}'.format(response))
             try:
-                self.s_server_tcp.shutdown(socket.SOCK_STREAM)
+                self.s_server_tcp.shutdown(socket.SHUT_WR)
                 self.s_server_tcp.close()
             except OSError as e2:
                 logging.error('Could not properly close the TCP socket: {0}'.format(e2))
