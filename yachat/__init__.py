@@ -1,1 +1,1 @@
-name = "yachat_cli"
+name = "yachat"
