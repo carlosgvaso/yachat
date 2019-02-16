@@ -3,9 +3,9 @@ yachat
 
 Chatroom server-client application. It consists of 2 modules:
 
-1. **server**: Membership chatroom server.
+* **server**: Membership chatroom server.
 
-2. **client**: Chatter chat client.
+* **client**: Chatter chat client.
 
 
 Chatter: Chat Client
@@ -34,7 +34,7 @@ optional arguments:
   -f LOG_FILE, --log-file LOG_FILE
                         Log file path. Log will print to stdin by default.
   -l LOG_LEVEL, --log-level LOG_LEVEL
-                        Verbosity level of the logger. Uses WARN by default.
+                        Verbosity level of the logger. Uses ERROR by default.
 ```
 
 
