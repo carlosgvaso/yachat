@@ -551,6 +551,7 @@ class Chatter:
         logging.debug('Closing UDP socket...')
         self.close_udp_socket()
 
+        print('\nbye')
         # Exit in error if we failed connecting to the server
         if count == self.retries:
             logging.critical('Reached the maximum attempts while exiting the server. Exiting...')
