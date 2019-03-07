@@ -132,16 +132,21 @@ class MemD:
             exit(err_socket)
 
         logging.debug('run_flag = {0}'.format(run_flag))
-        logging.info('Accepting connections...')
         while run_flag:
-            # Accept connections from outside
-            (s_client, ip_client) = self.s_welcome.accept()
-            logging.info('New connection accepted from host at: {0}'.format(ip_client))
+            logging.info('Accepting connections...')
+            try:
+                # Accept connections from outside
+                (s_client, ip_client) = self.s_welcome.accept()
+                logging.info('New connection accepted from host at: {0}'.format(ip_client))
 
-            # Pass connection to server thread
-            logging.info('Passing client to servant thread...')
-            st = Servant(s_client, self.clients, self.clients_lock)
-            st.run()
+                # Pass connection to server thread
+                logging.info('Passing client to servant thread...')
+                st = Servant(s_client, self.clients, self.clients_lock)
+                st.daemon = True
+                st.start()
+            except KeyboardInterrupt:
+                logging.warning('Received SIGINT signal. Exiting...')
+                run_flag = False
         logging.debug('run_flag = {0}'.format(run_flag))
         logging.info('Shutting down...')
 
@@ -157,6 +162,8 @@ class Servant(threading.Thread):
             :param  clients_dict    Shared list of clients in the server.
             :param  clients_lock    Lock object for the shared clients list.
         """
+        threading.Thread.__init__(self)
+
         self.s_client = client_socket
         self.c_shared_dict = clients_dict
         self.c_lock = clients_lock
@@ -176,8 +183,29 @@ class Servant(threading.Thread):
             return False
         return True
 
-    def process_helo_msg(self):
-        """ Receive and process the HELO message from the client.
+    def receive_exit_msg(self):
+        """ Receive and process the EXIT TCP message from the client.
+
+            :returns    True if received, False otherwise.
+        """
+        # Block the TCP socket reading until we get a message
+        logging.debug('Listening for EXIT message...')
+        try:
+            response = self.receive_tcp_msg()
+        except (OSError, InterruptedError, RuntimeError) as e1:
+            logging.error('Failed to get EXIT response: {0}'.format(e1))
+            response = bytes()
+        logging.debug('Received: {0}'.format(response))
+
+        # Process response
+        logging.debug('Processing EXIT message...')
+        if response == b'EXIT\n':
+            return True
+
+        return False
+
+    def receive_helo_msg(self):
+        """ Receive and process the HELO TCP message from the client.
 
             :returns    A tuple containing the screen name, IP and port of the client in that order, or None.
         """
@@ -256,6 +284,34 @@ class Servant(threading.Thread):
         logging.debug('msg_leftovers_tcp: {0}'.format(self.msg_leftovers_tcp))
         return msg
 
+    def remove_client(self, client_name):
+        """ Remove client information from the shared clients dictionary.
+
+            :returns    True if deleted, False otherwise.
+        """
+        c_removed = False
+        # Acquire the lock to the clients list
+        logging.debug('Acquiring lock...')
+        self.c_lock.acquire()
+        try:
+            # Check if the client is on the dict and remove
+            if self.c_shared_dict.pop(client_name, None):
+                logging.debug('Removed client from clients dict: {0}'.format(client_name))
+                c_removed = True
+            else:
+                logging.warning('Client not on the clients dict'.format(client_name))
+        except Exception as e1:
+            logging.warning('Could not remove client from the dict: {0}'.format(e1))
+            c_removed = None
+        finally:
+            # Make sure we release the lock no matter what
+            logging.debug('c_shared_dict = {0}'.format(self.c_shared_dict))
+            logging.debug('Releasing lock...')
+            self.c_lock.release()
+
+        logging.debug('c_removed = {0}'.format(c_removed))
+        return c_removed
+
     def run(self):
         """ Run.
         """
@@ -263,7 +319,7 @@ class Servant(threading.Thread):
 
         # Process HELO
         logging.info('Processing HELO msg...')
-        (c_name, c_ip, c_port) = self.process_helo_msg()
+        (c_name, c_ip, c_port) = self.receive_helo_msg()
 
         # Validate new client, and add it to client list if we got a proper HELO msg
         if c_name and c_ip and c_port:
@@ -277,6 +333,9 @@ class Servant(threading.Thread):
             # Send ACPT msg
             logging.info('Sending ACPT msg...')
             self.send_acpt_msg(c_dict)
+
+            # Notify all clients in the list over UDP that a new client joined the server
+            self.send_join_msg(c_name, c_dict)
         else:
             # Send RJCT msg
             logging.info('Sending RJCT msg...')
@@ -287,10 +346,23 @@ class Servant(threading.Thread):
             self.close_tcp_connection()
             return
 
-        #while run_flag:
-        #    # Block the socket
-        #    pass
+        while run_flag:
+            # Block the TCP socket waiting for the EXIT message
+            logging.info('Waiting for EXIT TCP message...')
+            exited = self.receive_exit_msg()
+
+            # if we got an EXIT msg, notify other clients and exit loop
+            if exited:
+                logging.info('Received EXIT TCP message, notifying clients...')
+                self.send_exit_msg(c_name, c_dict)
+                break
+
+        # Remove client from share clients dict
+        logging.info('Removing client from shared clients dict...')
+        self.remove_client(c_name)
+
         # Close TCP connection and return
+        logging.info('Closing TCP connection and returning...')
         self.close_tcp_connection()
         return
 
@@ -315,6 +387,28 @@ class Servant(threading.Thread):
         except (OSError, InterruptedError, RuntimeError) as e1:
             logging.error('Could not sent ACPT message: {0}'.format(e1))
             return False
+        return True
+
+    def send_exit_msg(self, client_name, clients_dict):
+        """ Notify all clients in the server that a client exited the server.
+
+            :param      client_name     Client's name of the client that exited the server.
+            :param      clients_dict    Clients dictionary with all the clients in the server.
+            :returns    True is the message was sent, False otherwise.
+
+            TODO: Implement this method.
+        """
+        return True
+
+    def send_join_msg(self, client_name, clients_dict):
+        """ Notify all clients in the server that a new client joined the server.
+
+            :param      client_name     Client's name of the client that joined the server.
+            :param      clients_dict    Clients dictionary with all the clients in the server.
+            :returns    True is the message was sent, False otherwise.
+
+            TODO: Implement this method.
+        """
         return True
 
     def send_rjct_msg(self, client_name):
@@ -378,6 +472,7 @@ class Servant(threading.Thread):
             c_valid = None
         finally:
             # Make sure we release the lock no matter what
+            logging.debug('c_shared_dict = {0}'.format(self.c_shared_dict))
             logging.debug('Releasing lock...')
             self.c_lock.release()
 
