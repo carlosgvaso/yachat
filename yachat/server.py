@@ -6,8 +6,6 @@ import signal           # Signal managing
 import socket           # TCP and UDP sockets
 import select           # Poll socket for incoming data
 import threading        # Multi-threading
-#import queue            # Queue to share data between threads
-#from time import sleep  # Sleeping
 
 
 ##
@@ -28,6 +26,7 @@ proto_tcp_helo = 'HELO {0} {1} {2}\n'   # HELO <screen_name> <IP> <Port>\n
 proto_tcp_acpt = 'ACPT {0}\n'           # ACPT <SN1> <IP1> <PORT1>:<SN2> <IP2> <PORT2>:...:<SNn> <IPn> <PORTn>\n
 proto_tcp_rjct = 'RJCT {0}\n'           # RJCT <screen_name>\n
 proto_tcp_exit = 'EXIT\n'               # EXIT\n
+proto_tcp_exit_2 = 'EXIT \n'            # EXIT \n, for compatibility with the instructor's client
 proto_udp_join = 'JOIN {0} {1} {2}\n'   # JOIN <screen_name> <IP> <Port>\n
 proto_udp_mesg = 'MESG {0}: {1}\n'      # MESG <screen_name>: <message>\n
 proto_udp_exit = 'EXIT {0}\n'           # EXIT <screen_name>\n
@@ -46,38 +45,54 @@ class MemD:
     """ Chat client main class.
     """
 
-    def __init__(self, welcome_port, retries=10, sleep_time=0.2):
+    def __init__(self, welcome_port, retries=10):
         """ Initialize instance variables.
 
             :param  welcome_port    Welcome TCP port of the YaChat membership server.
             :param  retries         Connection retries before quiting.
-            :param  sleep_time      Time to pause in between loops in sec.
         """
-        self.ip = None
-        self.welcome_port = welcome_port
-        self.s_welcome = None
-        logging.info('Server welcome port: {0}'.format(self.welcome_port))
+        self.ip = '0.0.0.0'                 # IP to bind the welcome socket to (bind to all available interfaces)
+        self.welcome_port = welcome_port    # Welcome TCP socket port number
+        self.s_welcome = None               # Welcome TCP socket object
+        logging.info('Server welcome TCP IP and port: {0}:{1}'.format(self.ip, self.welcome_port))
 
         self.clients = dict()   # Client dict in the format: {'screen_name': {'ip': 'X.X.X.X', 'udp_port': X}, ...}
-        self.clients_lock = threading.Lock()
+        self.clients_lock = threading.RLock()
 
         global run_flag
         run_flag = True  # Global flag
 
         self.retries = retries
-        self.sleep_time = sleep_time
+
+    def close_socket_connection(self, conn):
+        """ Safely close socket connection.
+
+            :param      conn    Socket object of the connection to close.
+            :returns    True if the connection was safely closed, False otherwise.
+        """
+        try:
+            if conn.type == socket.SOCK_STREAM:
+                logging.debug('Shutting down TCP socket connection...')
+                conn.shutdown(socket.SHUT_WR)
+            logging.debug('Closing socket connection...')
+            conn.close()
+        except (OSError, InterruptedError, RuntimeError) as e1:
+            logging.error('Could not close socket connection: {0}'.format(e1))
+            return False
+        logging.debug('Socket connection closed!')
+        return True
 
     def create_tcp_server_socket(self):
         """ Create a TCP server socket.
 
-            :returns    TCP socket object, or None if it was not possible to create the socket.
+            :returns    TCP server socket object, or None if it was not possible to create the socket.
         """
-        logging.debug('Creating server TCP socket at {0}:{1}...'.format(self.ip, self.welcome_port))
+        logging.debug('Creating TCP server socket at {0}:{1}...'.format(self.ip, self.welcome_port))
         try:
             # Create an INET, STREAMing socket
             s_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-            # Bind the socket to the givenIP, and port
+            # Bind the socket to the given IP, and port
             s_server.bind((self.ip, self.welcome_port))
 
             # Become a server socket
@@ -91,7 +106,7 @@ class MemD:
                 logging.error('Could not properly close TCP server socket: {0}'.format(e2))
             return None
 
-        logging.debug('Server TCP socket successfully created!')
+        logging.debug('TCP server socket successfully created!')
         return s_server
 
     def get_local_ip(self):
@@ -114,15 +129,6 @@ class MemD:
         """
         global run_flag
 
-        # Get local IP
-        logging.info('Getting local IP...')
-        self.ip = self.get_local_ip()
-        if self.ip is None:
-            logging.critical('Could not get local IP to open the TCP socket')
-            run_flag = False
-            exit(err_socket)
-        logging.info('Local IP: {0}'.format(self.ip))
-
         # Create welcome socket
         logging.info('Creating welcome socket...')
         self.s_welcome = self.create_tcp_server_socket()
@@ -142,25 +148,39 @@ class MemD:
                 # Pass connection to server thread
                 logging.info('Passing client to servant thread...')
                 st = Servant(s_client, self.clients, self.clients_lock)
-                st.daemon = True
+                st.daemon = True    # TODO: Take this out once we can tell the servant threads to exit.
                 st.start()
             except KeyboardInterrupt:
                 logging.warning('Received SIGINT signal. Exiting...')
                 run_flag = False
+
+                # Safely terminate the servant threads
+                # TODO: Safely terminate the servants. Use events?
+                #logging.info('Closing the client TCP server socket connection...')
+
         logging.debug('run_flag = {0}'.format(run_flag))
+
+        # TODO: Wait for the servant threads to return
+
+        # Try to close the TCP socket
+        logging.info('Closing the welcome TCP server socket connection...')
+        self.close_socket_connection(self.s_welcome)
+
         logging.info('Shutting down...')
+        logging.debug('Exiting main thread...')
 
 
 class Servant(threading.Thread):
     """ Servant thread class.
     """
     
-    def __init__(self, client_socket, clients_dict, clients_lock):
+    def __init__(self, client_socket, clients_dict, clients_lock, retries=10):
         """ Constructor.
 
             :param  client_socket   Client TCP socket object.
             :param  clients_dict    Shared list of clients in the server.
             :param  clients_lock    Lock object for the shared clients list.
+            :param  retries         Connection retries before quiting.
         """
         threading.Thread.__init__(self)
 
@@ -169,19 +189,49 @@ class Servant(threading.Thread):
         self.c_lock = clients_lock
 
         self.msg_leftovers_tcp = bytes()    # If we receive the beginning of the next msg, save it here
+        self.retries = retries
 
-    def close_tcp_connection(self):
-        """ Safely close TCP socket connection.
+    def close_socket_connection(self, conn):
+        """ Safely close socket connection.
 
+            :param      conn    Socket object of the connection to close.
             :returns    True if the connection was safely closed, False otherwise.
         """
         try:
-            self.s_client.shutdown(socket.SHUT_WR)
-            self.s_client.close()
+            if conn.type == socket.SOCK_STREAM:
+                logging.debug('Shutting down TCP socket connection...')
+                conn.shutdown(socket.SHUT_WR)
+            logging.debug('Closing socket connection...')
+            conn.close()
         except (OSError, InterruptedError, RuntimeError) as e1:
-            logging.error('Could not close TCP socket connection: {0}'.format(e1))
+            logging.error('Could not close socket connection: {0}'.format(e1))
             return False
+        logging.debug('Socket connection closed!')
         return True
+
+    def create_udp_socket(self, ip, port):
+        """ Create UDP socket to talk to clients.
+
+            :param      ip      IP address to connect to.
+            :param      port    UDP port to connect to.
+            :returns    UDP socket object, or None if it was not possible to connect the socket.
+        """
+        logging.info('Creating UDP socket at {0}:{1}...'.format(ip, port))
+
+        # Create a UDP server socket
+        try:
+            s_udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s_udp.connect((ip, port))
+        except OSError as e1:
+            logging.error('Could not connect UDP socket: {0}'.format(e1))
+            try:
+                s_udp.close()
+            except OSError as e2:
+                logging.error('Could not properly close UDP socket: {0}'.format(e2))
+            return None
+
+        logging.debug('UDP socket successfully connected!')
+        return s_udp
 
     def receive_exit_msg(self):
         """ Receive and process the EXIT TCP message from the client.
@@ -197,11 +247,15 @@ class Servant(threading.Thread):
             response = bytes()
         logging.debug('Received: {0}'.format(response))
 
-        # Process response
+        # Process response.
+        # Added case when there is a space between the `EXIT` word and the `\n`
+        # for compatibility with the instructor's client.
         logging.debug('Processing EXIT message...')
-        if response == b'EXIT\n':
+        if response == bytes(proto_tcp_exit, encoding='utf-8') or response == bytes(proto_tcp_exit_2, encoding='utf-8'):
+            logging.debug('EXIT message received')
             return True
 
+        logging.debug('Failed to receive EXIT message')
         return False
 
     def receive_helo_msg(self):
@@ -321,6 +375,9 @@ class Servant(threading.Thread):
         logging.info('Processing HELO msg...')
         (c_name, c_ip, c_port) = self.receive_helo_msg()
 
+        # Acquire the lock to the clients list
+        logging.debug('Acquiring lock...')
+        self.c_lock.acquire()
         # Validate new client, and add it to client list if we got a proper HELO msg
         if c_name and c_ip and c_port:
             logging.info('Validating screen name...')
@@ -335,35 +392,66 @@ class Servant(threading.Thread):
             self.send_acpt_msg(c_dict)
 
             # Notify all clients in the list over UDP that a new client joined the server
+            logging.info('Sending JOIN msg...')
             self.send_join_msg(c_name, c_dict)
         else:
+            # Make sure we release the lock so other threads can acquire it
+            logging.debug('Releasing lock...')
+            self.c_lock.release()
+
             # Send RJCT msg
             logging.info('Sending RJCT msg...')
             self.send_rjct_msg(c_name)
 
             # Close socket and return
             logging.info('Closing TCP connection and exiting thread...')
-            self.close_tcp_connection()
+            self.close_socket_connection(self.s_client)
             return
 
-        while run_flag:
+        # Make sure we release the lock so other threads can acquire it
+        logging.debug('Releasing lock...')
+        self.c_lock.release()
+
+        # TODO: Add event to exit the loop when the main thread says so
+        exited = False
+        tries = 1
+        while run_flag and tries <= self.retries and not exited:
             # Block the TCP socket waiting for the EXIT message
             logging.info('Waiting for EXIT TCP message...')
+            logging.debug('Tries: {0}'.format(tries))
             exited = self.receive_exit_msg()
+            tries += 1
 
-            # if we got an EXIT msg, notify other clients and exit loop
-            if exited:
-                logging.info('Received EXIT TCP message, notifying clients...')
-                self.send_exit_msg(c_name, c_dict)
-                break
+        # Show errors if we failed to get EXIT message from client
+        if tries >= self.retries:
+            logging.error('Reached the maximum attempts while trying to receive the EXIT TCP message')
+        elif exited:
+            logging.info('Received EXIT TCP message')
+        elif not run_flag:
+            logging.warning('Received exit signal from main thread')
+            logging.debug('run_flag = {0}'.format(run_flag))
+        else:
+            logging.error('Exited loop unexpectedly')
+
+        # Acquire the lock to the clients list
+        logging.debug('Acquiring lock...')
+        self.c_lock.acquire()
+
+        logging.info('Notifying client removal to all clients...')
+        c_dict = self.update_clients_dict()
+        self.send_exit_msg(c_name, c_dict)
 
         # Remove client from share clients dict
         logging.info('Removing client from shared clients dict...')
         self.remove_client(c_name)
 
+        # Make sure we release the lock so other threads can acquire it
+        logging.debug('Releasing lock...')
+        self.c_lock.release()
+
         # Close TCP connection and return
         logging.info('Closing TCP connection and returning...')
-        self.close_tcp_connection()
+        self.close_socket_connection(self.s_client)
         return
 
     def send_acpt_msg(self, clients_dict):
@@ -383,7 +471,7 @@ class Servant(threading.Thread):
         logging.debug('msg = {0}'.format(msg))
 
         try:
-            self.send_tcp_msg(msg)
+            self.send_msg(self.s_client, msg)
         except (OSError, InterruptedError, RuntimeError) as e1:
             logging.error('Could not sent ACPT message: {0}'.format(e1))
             return False
@@ -395,10 +483,44 @@ class Servant(threading.Thread):
             :param      client_name     Client's name of the client that exited the server.
             :param      clients_dict    Clients dictionary with all the clients in the server.
             :returns    True is the message was sent, False otherwise.
-
-            TODO: Implement this method.
         """
-        return True
+        sent_all = True
+        msg = bytes(proto_udp_exit.format(client_name).encode(encoding='utf-8'))
+        logging.debug('msg = {0}'.format(msg))
+
+        for screen_name in clients_dict:
+            sent = False
+            tries = 1
+            while tries <= self.retries and not sent:
+                c_ip = clients_dict.get(screen_name, {'ip': None}).get('ip', None)
+                try:
+                    c_port = int(clients_dict.get(screen_name, {'udp_port': None}).get('udp_port', None))
+                except (TypeError, ValueError) as e1:
+                    logging.error('Could not make the UDP port an int: '.format(e1))
+                    c_port = None
+
+                logging.debug('Sending EXIT UDP msg to {0} at {1}:{2}'.format(screen_name, c_ip, c_port))
+                logging.debug('Tries: {0}'.format(tries))
+                if not c_ip or not c_port:
+                    logging.error('Incorrect client IP or port: {0}:{1}'.format(c_ip, c_port))
+                    break
+                sent = self.send_udp_msg(c_ip, c_port, msg)
+                tries += 1
+
+            # Show errors if we failed to send EXIT message to client
+            if tries >= self.retries:
+                logging.error('Reached the maximum attempts while trying to send EXIT UDP message')
+                sent_all = False
+            elif sent:
+                logging.debug('EXIT UDP message sent!')
+            elif not c_ip or not c_port:
+                # This is here to avoid giving and exited loop unexpectedly error
+                pass
+            else:
+                logging.error('Exited loop unexpectedly')
+                sent_all = False
+
+        return sent_all
 
     def send_join_msg(self, client_name, clients_dict):
         """ Notify all clients in the server that a new client joined the server.
@@ -406,10 +528,47 @@ class Servant(threading.Thread):
             :param      client_name     Client's name of the client that joined the server.
             :param      clients_dict    Clients dictionary with all the clients in the server.
             :returns    True is the message was sent, False otherwise.
-
-            TODO: Implement this method.
         """
-        return True
+        sent_all = True
+        msg = bytes(proto_udp_join.format(client_name,
+                                          clients_dict.get(client_name, {'ip': None}).get('ip', 'None'),
+                                          clients_dict.get(client_name, {'udp_port': None}).get('udp_port', 'None')).
+                    encode(encoding='utf-8'))
+        logging.debug('msg = {0}'.format(msg))
+
+        for screen_name in clients_dict:
+            sent = False
+            tries = 1
+            while tries <= self.retries and not sent:
+                c_ip = clients_dict.get(screen_name, {'ip': None}).get('ip', None)
+                try:
+                    c_port = int(clients_dict.get(screen_name, {'udp_port': None}).get('udp_port', None))
+                except (TypeError, ValueError) as e1:
+                    logging.error('Could not make the UDP port an int: '.format(e1))
+                    c_port = None
+
+                logging.debug('Sending JOIN UDP msg to {0} at {1}:{2}'.format(screen_name, c_ip, c_port))
+                logging.debug('Tries: {0}'.format(tries))
+                if not c_ip or not c_port:
+                    logging.error('Incorrect client IP or port: {0}:{1}'.format(c_ip, c_port))
+                    break
+                sent = self.send_udp_msg(c_ip, c_port, msg)
+                tries += 1
+
+            # Show errors if we failed to send JOIN message to client
+            if tries >= self.retries:
+                logging.error('Reached the maximum attempts while trying to send JOIN UDP message')
+                sent_all = False
+            elif sent:
+                logging.debug('JOIN UDP message sent!')
+            elif not c_ip or not c_port:
+                # This is here to avoid giving and exited loop unexpectedly error
+                pass
+            else:
+                logging.error('Exited loop unexpectedly')
+                sent_all = False
+
+        return sent_all
 
     def send_rjct_msg(self, client_name):
         """ Send RJCT message to client.
@@ -421,15 +580,16 @@ class Servant(threading.Thread):
         logging.debug('msg = {0}'.format(msg))
 
         try:
-            self.send_tcp_msg(msg)
+            self.send_msg(self.s_client, msg)
         except (OSError, InterruptedError, RuntimeError) as e1:
             logging.error('Could not sent RJCT message: {0}'.format(e1))
             return False
         return True
 
-    def send_tcp_msg(self, msg):
-        """ Send message over TCP socket.
+    def send_msg(self, conn, msg):
+        """ Send message over TCP/UDP socket.
 
+            :param      conn    Socket connection.
             :param      msg     Bytes object to send.
             :returns    Length in bytes of the message sent.
         """
@@ -439,7 +599,7 @@ class Servant(threading.Thread):
         msg_sent = 0
 
         while msg_sent < msg_len:
-            sent = self.s_client.send(msg[msg_sent:])
+            sent = conn.send(msg[msg_sent:])
             if sent == 0:
                 raise RuntimeError("Socket connection broken")
             msg_sent += sent
@@ -447,6 +607,42 @@ class Servant(threading.Thread):
             logging.debug('msg_sent: {0}'.format(msg_sent))
 
         return msg_sent
+
+    def send_udp_msg(self, ip, port, msg):
+        """ Create UDP socket and send message.
+        
+            :param      ip      IP address of conenction.
+            :param      port    UDP port of connection.
+            :param      msg     Bytes object to send.
+            :returns    True if message successfully sent, False otherwise.
+        """
+        try:
+            s_udp = self.create_udp_socket(ip, port)
+            self.send_msg(s_udp, msg)
+        except (OSError, InterruptedError, RuntimeError) as e1:
+            logging.error('Could not send message over UDP socket: {0}'.format(e1))
+            return False
+        return True
+
+    def update_clients_dict(self):
+        """ Fetch the latest version of the clients dict.
+
+            :returns    The latest version of the clients dictionary, or None
+        """
+        # Acquire the lock to the clients list
+        logging.debug('Acquiring lock...')
+        self.c_lock.acquire()
+        try:
+            c_dict = self.c_shared_dict.copy()
+        except Exception as e1:
+            logging.error('Could not insert the client in the dict: {0}'.format(e1))
+            c_dict = None
+        finally:
+            # Make sure we release the lock no matter what
+            logging.debug('c_shared_dict = {0}'.format(self.c_shared_dict))
+            logging.debug('Releasing lock...')
+            self.c_lock.release()
+        return c_dict
 
     def validate_client(self, screen_name, client_ip, client_port):
         """ Validate screen name, and insert it into the clients dict.
